@@ -55,6 +55,13 @@ def check(workspace: str) -> list[str]:
             except Exception as e:
                 issues.append(f"Qdrant error: {e}")
 
+    reranker_cfg = cfg.get("reranker", {})
+    if reranker_cfg.get("enabled", True):
+        try:
+            from sentence_transformers import CrossEncoder  # noqa: F401
+        except ImportError:
+            issues.append("sentence-transformers (CrossEncoder) not installed — run: pip install -r requirements.txt")
+
     return issues
 
 
