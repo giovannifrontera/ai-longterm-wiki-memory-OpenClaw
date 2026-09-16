@@ -11,7 +11,7 @@
 [![License](https://img.shields.io/badge/License-AGPL_3.0-blue?style=flat-square)](LICENSE)
 [![Last Commit](https://img.shields.io/github/last-commit/giovannifrontera/ai-longterm-wiki-memory-OpenClaw?style=flat-square)](https://github.com/giovannifrontera/ai-longterm-wiki-memory-OpenClaw/commits)
 
-[Problem](#-the-problem) · [Theory](#-theoretical-framework) · [Architecture](#-three-layer-architecture) · [Features](#-features) · [Interface](#-web-interface) · [Quick Start](#-quick-start) · [Ecosystem](#-ai-wiki-ecosystem)
+[Problem](#-the-problem) · [Theory](#-theoretical-framework) · [Architecture](#-three-layer-architecture) · [Pipeline](#-how-it-works--the-pipeline) · [Features](#-features) · [Interface](#-web-interface) · [Quick Start](#-quick-start) · [Ecosystem](#-ai-wiki-ecosystem)
 
 </div>
 
@@ -88,6 +88,61 @@ Every wiki page exists simultaneously in two synchronised forms:
 ```
 
 Markdown and embeddings are written **atomically** (`tmp → staging → production`) and kept in sync at all times. A crash at any point leaves the system in a detectable, recoverable state.
+
+---
+
+## 🔄 How It Works — The Pipeline
+
+Two moments matter: **reading** (a query needs an answer, right now, from what's already known) and **writing** (a source has new knowledge worth keeping). Everything else in this project is scaffolding around these two flows.
+
+### Query pipeline — every user message, before the agent even sees it
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant H as wiki_context.py (hook)
+    participant E as bge-m3 (bi-encoder)
+    participant Q as Qdrant
+    participant R as bge-reranker-v2-m3 (cross-encoder)
+    participant A as Agent
+
+    U->>H: types a message
+    H->>E: encode(query) — 1024-dim vector
+    H->>Q: ANN search, over-fetch k×8 candidates
+    Q-->>H: candidate chunks, bi-encoder ranked
+    H->>R: rerank each (query, chunk) pair jointly
+    R-->>H: cross-encoder scores
+    H->>H: dedupe per page, keep top-K
+    H-->>A: <wiki-context> block prepended to the prompt
+    A->>U: responds — grounded, no manual lookup needed
+```
+
+The bi-encoder does the cheap part — narrowing millions-of-tokens-worth of wiki down to a few dozen candidates in milliseconds. The cross-encoder does the expensive-but-precise part — deciding, among those few dozen, which ones actually answer *this* query. Neither stage alone is enough: bi-encoder-only retrieval is fast but occasionally confidently wrong; cross-encoder-only retrieval would be accurate but too slow to run over an entire knowledge base on every message.
+
+### Ingest pipeline — turning a source into permanent, searchable knowledge
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant A as Agent
+    participant W as wiki.py ingest
+    participant Emb as wiki_embed.py
+    participant Qs as Qdrant (staging)
+    participant FS as Markdown files
+
+    U->>A: "study this paper on RAG architectures"
+    A->>A: writes structured pages as .tmp files
+    A->>W: wiki.py ingest --pages ...
+    W->>Emb: chunk (boundary-aware) + embed each page
+    Emb->>Qs: upsert into staging_wiki_pages
+    W->>Qs: promote_staging() — atomic commit
+    W->>FS: move .tmp → final path
+    W-->>A: "2 pages written. Mini-lint: ok."
+    A->>A: checks promotion criteria (≥3 queries, cross-domain?)
+    A->>A: promotes to wiki/ autonomously if criteria met
+```
+
+Nothing is ever written straight to `wiki_pages` — every ingest lands in staging first, and only `promote_staging()` makes it live. If the process dies between those two steps, the next session finds staging still populated, logs it, and clears it — the knowledge base never ends up half-written.
 
 ---
 
