@@ -78,12 +78,8 @@ def _run(args):
     if not cfg:
         return
 
-    lancedb_path = os.path.join(args.workspace, cfg["lancedb"]["path"])
-    if not os.path.exists(lancedb_path):
-        return
-
     try:
-        import lancedb
+        from qdrant_client import QdrantClient
         os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
         os.environ.setdefault("HF_HUB_VERBOSITY", "error")
         os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -92,36 +88,42 @@ def _run(args):
         logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
         logging.getLogger("transformers").setLevel(logging.ERROR)
         logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+        import wiki_qdrant
+        import wiki_rerank
     except ImportError:
         return
 
-    db = lancedb.connect(lancedb_path)
-    table_result = db.list_tables()
-    existing = getattr(table_result, "tables", None) or list(table_result)
-    if "wiki_pages" not in existing:
+    qdrant_cfg = cfg.get("qdrant", {})
+    client = QdrantClient(
+        host=qdrant_cfg.get("host", "localhost"),
+        port=qdrant_cfg.get("port", 6333),
+    )
+    coll = qdrant_cfg.get("collection", "wiki_pages")
+    existing_colls = [c.name for c in client.get_collections().collections]
+    if coll not in existing_colls:
         return
 
-    table = db.open_table("wiki_pages")
-    model = SentenceTransformer(cfg["lancedb"]["embedding_model"], device="cpu")
+    # device=None → sentence-transformers auto-sceglie CUDA se disponibile
+    model = SentenceTransformer(cfg.get("embedding_model", "BAAI/bge-m3"), device=cfg.get("device"))
     vector = model.encode(args.q, normalize_embeddings=True).tolist()
 
-    # Over-fetch per deduplicare per pagina, poi prendere i top-k
-    raw = table.search(vector).limit(args.k * 4).to_list()
+    # Over-fetch per il reranking cross-encoder + dedup per pagina, poi prendere i top-k
+    raw = wiki_qdrant.query_similar(client, cfg, vector, k=args.k * 8)
 
     exclude_patterns = cfg.get("exclude_from_index", [])
-    seen: dict[str, dict] = {}
-    for r in raw:
-        chunk = r.get("chunk_text") or ""
-        if not chunk:
-            continue
-        path = r["path"]
-        if any(fnmatch.fnmatch(path, p) for p in exclude_patterns):
-            continue
-        dist = float(r.get("_distance", 1.0))
-        if path not in seen or dist < seen[path]["dist"]:
-            seen[path] = {"dist": dist, "chunk_text": chunk[: args.max_chars]}
+    candidates = [
+        r for r in raw
+        if r.get("chunk_text") and not any(fnmatch.fnmatch(r["path"], p) for p in exclude_patterns)
+    ]
+    candidates = wiki_rerank.rerank(args.q, candidates, cfg)
 
-    top = sorted(seen.items(), key=lambda x: x[1]["dist"])[: args.k]
+    seen: dict[str, dict] = {}
+    for r in candidates:
+        path = r["path"]
+        if path not in seen or r["_rerank_score"] > seen[path]["score"]:
+            seen[path] = {"score": r["_rerank_score"], "chunk_text": r["chunk_text"][: args.max_chars]}
+
+    top = sorted(seen.items(), key=lambda x: x[1]["score"], reverse=True)[: args.k]
 
     # Check for stale .tmp files — warn regardless of whether semantic results exist
     stale_tmp = []
@@ -160,7 +162,7 @@ def _run(args):
             f"Pre-loaded wiki context (top {len(top)} pages by semantic relevance):\n"
         )
     for path, info in top:
-        score = round(1.0 - info["dist"], 3)
+        score = round(info["score"], 3)
         lines.append(f"### {path}  [relevance: {score}]")
         lines.append(info["chunk_text"])
         lines.append("")

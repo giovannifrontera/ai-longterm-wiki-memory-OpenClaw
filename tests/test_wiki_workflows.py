@@ -11,18 +11,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 def test_lint_status_written(tmp_workspace, monkeypatch):
     import wiki_workflows
+    from qdrant_client import QdrantClient
 
-    class FakeTable:
-        def to_pandas(self):
-            import pandas as pd
-            return pd.DataFrame({"path": []})
-        def delete(self, expr):
-            pass
-
-    monkeypatch.setattr(wiki_workflows, "get_db", lambda path: object())
-    monkeypatch.setattr(wiki_workflows, "ensure_table", lambda db, table_name="wiki_pages": FakeTable())
-    monkeypatch.setattr(wiki_workflows, "detect_renames", lambda db, fs_paths, workspace: [])
-    monkeypatch.setattr(wiki_workflows, "find_semantic_duplicates", lambda db, auto_threshold, warn_threshold: [])
+    monkeypatch.setattr(wiki_workflows, "get_db", lambda cfg: QdrantClient(":memory:"))
+    monkeypatch.setattr(wiki_workflows, "detect_renames", lambda db, cfg, fs_paths, workspace: [])
+    monkeypatch.setattr(wiki_workflows, "find_semantic_duplicates", lambda db, cfg, auto_threshold, warn_threshold: [])
 
     cfg = json.loads((tmp_workspace / "wiki.config.json").read_text())
 
@@ -44,8 +37,9 @@ def test_lint_status_written(tmp_workspace, monkeypatch):
 
 def test_lint_status_written_no_full(tmp_workspace, monkeypatch):
     import wiki_workflows
+    from qdrant_client import QdrantClient
 
-    monkeypatch.setattr(wiki_workflows, "get_db", lambda path: object())
+    monkeypatch.setattr(wiki_workflows, "get_db", lambda cfg: QdrantClient(":memory:"))
 
     cfg = json.loads((tmp_workspace / "wiki.config.json").read_text())
 
@@ -65,23 +59,16 @@ def test_lint_status_written_no_full(tmp_workspace, monkeypatch):
 def test_lint_full_reports_semantic_duplicates(tmp_workspace, monkeypatch):
     import wiki_workflows
     import io, sys
+    from qdrant_client import QdrantClient
 
     fake_duplicates = [
         {"page_a": "wiki-works/test/a.md", "page_b": "wiki-works/test/b.md",
          "similarity": 0.95, "action": "auto_merge"},
     ]
 
-    class FakeTable:
-        def to_pandas(self):
-            import pandas as pd
-            return pd.DataFrame({"path": [], "chunk_id": [], "page_hash": []})
-        def delete(self, expr):
-            pass
-
-    monkeypatch.setattr(wiki_workflows, "get_db", lambda path: object())
-    monkeypatch.setattr(wiki_workflows, "ensure_table", lambda db, table_name="wiki_pages": FakeTable())
-    monkeypatch.setattr(wiki_workflows, "detect_renames", lambda db, fs_paths, workspace: [])
-    monkeypatch.setattr(wiki_workflows, "find_semantic_duplicates", lambda db, auto_threshold, warn_threshold: fake_duplicates)
+    monkeypatch.setattr(wiki_workflows, "get_db", lambda cfg: QdrantClient(":memory:"))
+    monkeypatch.setattr(wiki_workflows, "detect_renames", lambda db, cfg, fs_paths, workspace: [])
+    monkeypatch.setattr(wiki_workflows, "find_semantic_duplicates", lambda db, cfg, auto_threshold, warn_threshold: fake_duplicates)
 
     cfg = json.loads((tmp_workspace / "wiki.config.json").read_text())
 
@@ -150,7 +137,7 @@ def test_ingest_pdf_already_in_inbox_does_not_crash(tmp_workspace, monkeypatch):
     pdf = tmp_workspace / "pdf-inbox" / "test.pdf"
     pdf.write_bytes(b"%PDF-1.4 fake")
 
-    # Mock scan_inbox per non richiedere lancedb/embeddings
+    # Mock scan_inbox per non richiedere qdrant/embeddings
     # scan_inbox è importata localmente dentro cmd_ingest_pdf da wiki_pdf_watcher
     # Ensure the module is loaded before patching (safe pattern)
     import importlib

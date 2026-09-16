@@ -127,7 +127,8 @@ mkdir -p /path/to/workspace/wiki /path/to/workspace/wiki-works /path/to/workspac
     "dedup_auto": 0.90, "dedup_warn": 0.75
   },
   "self_reflection": { "enabled": true, "correction_threshold": 3 },
-  "lancedb": { "path": "memory/lancedb", "embedding_model": "BAAI/bge-m3" },
+  "embedding_model": "BAAI/bge-m3",
+  "qdrant": { "host": "localhost", "port": 6333, "collection": "wiki_pages" },
   "exclude_from_index": []
 }
 ```

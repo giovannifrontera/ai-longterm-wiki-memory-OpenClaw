@@ -51,7 +51,7 @@ Verify that `pythonExecutable` in the OpenClaw config is the absolute path:
 py -c "import sys; print(sys.executable)"
 ```
 
-### Step OC-5: Initialize LanceDB
+### Step OC-5: Initialize Qdrant
 
 Same as CC-4.
 

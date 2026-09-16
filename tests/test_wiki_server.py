@@ -147,21 +147,21 @@ def test_api_stats_top_queried(server_client, tmp_workspace):
 
 
 def test_api_stats_unembedded(server_client, tmp_workspace, monkeypatch):
-    import pandas as pd
-    import wiki_lancedb
+    import wiki_server
+    import wiki_qdrant
+    from qdrant_client import QdrantClient
 
     (tmp_workspace / "wiki" / "concepts" / "embedding.md").write_text(
         "---\ntitle: Embedding\n---\n\nContent.", encoding="utf-8"
     )
 
-    class FakeTable:
-        def to_pandas(self):
-            # Solo rag.md e' embedded
-            return pd.DataFrame({"path": ["wiki/concepts/rag.md"]})
-
-    monkeypatch.setattr(wiki_lancedb, "get_db", lambda path: object())
-    monkeypatch.setattr(wiki_lancedb, "ensure_table",
-                        lambda *args, **kwargs: FakeTable())
+    # Solo rag.md e' embedded
+    client = QdrantClient(":memory:")
+    cfg = wiki_server._cfg
+    wiki_qdrant.upsert(client, cfg, "wiki/concepts/rag.md", [
+        {"chunk_id": 0, "chunk_text": "rag", "content_hash": "a", "page_hash": "a", "vector": [0.0] * 1024},
+    ])
+    monkeypatch.setattr(wiki_server, "_qdrant_get_db", lambda cfg: client)
 
     resp = server_client.get("/api/stats")
     assert resp.status_code == 200

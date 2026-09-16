@@ -35,32 +35,25 @@ def check(workspace: str) -> list[str]:
         issues.append("wiki.config.json is not valid JSON")
         return issues
 
-    ldb_rel = cfg.get("lancedb", {}).get("path", "")
-    if not ldb_rel:
-        issues.append("wiki.config.json: lancedb.path field missing")
+    qcfg = cfg.get("qdrant", {})
+    if not qcfg.get("host"):
+        issues.append("wiki.config.json: qdrant.host field missing")
     else:
-        ldb_path = ws / ldb_rel
-        if not ldb_path.exists():
-            issues.append(f"LanceDB not found at {ldb_path} — run: wiki.py rebuild")
+        try:
+            from qdrant_client import QdrantClient
+        except ImportError:
+            issues.append("qdrant-client not installed — run: pip install -r requirements.txt")
         else:
-            # Separate import from connection: lancedb.connect() internally triggers
-            # ImportErrors for Unix-only modules (posix, fcntl, adlfs) on Windows.
-            # A broad except ImportError would misidentify these as missing lancedb.
             try:
-                import lancedb
-            except ImportError:
-                issues.append("lancedb not installed — run: pip install -r requirements.txt")
-            else:
-                try:
-                    db = lancedb.connect(str(ldb_path))
-                    table_result = db.list_tables()
-                    tables = getattr(table_result, "tables", None) or list(table_result)
-                    if "wiki_pages" not in tables:
-                        issues.append("wiki_pages table not found — run: wiki.py rebuild")
-                    elif db.open_table("wiki_pages").count_rows() == 0:
-                        issues.append("wiki_pages is empty — run: wiki.py rebuild")
-                except Exception as e:
-                    issues.append(f"LanceDB error: {e}")
+                client = QdrantClient(host=qcfg.get("host", "localhost"), port=qcfg.get("port", 6333))
+                coll_name = qcfg.get("collection", "wiki_pages")
+                collections = [c.name for c in client.get_collections().collections]
+                if coll_name not in collections:
+                    issues.append(f"Qdrant collection '{coll_name}' not found — run: wiki.py rebuild")
+                elif client.count(coll_name).count == 0:
+                    issues.append(f"Qdrant collection '{coll_name}' is empty — run: wiki.py rebuild")
+            except Exception as e:
+                issues.append(f"Qdrant error: {e}")
 
     return issues
 

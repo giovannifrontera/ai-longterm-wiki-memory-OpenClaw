@@ -8,7 +8,7 @@ def tmp_workspace(tmp_path):
     (tmp_path / "wiki" / "synthesis").mkdir(parents=True)
     (tmp_path / "wiki-works" / "test").mkdir(parents=True)
     (tmp_path / "wiki-works" / "test" / "raw").mkdir(parents=True)
-    (tmp_path / "memory" / "lancedb").mkdir(parents=True)
+    (tmp_path / "memory" / "qdrant").mkdir(parents=True)
     (tmp_path / "pdf-inbox").mkdir(parents=True)
 
     config = {
@@ -19,6 +19,7 @@ def tmp_workspace(tmp_path):
         "pdf_inbox": {
             "project_default": "test"
         },
+        "embedding_model": "BAAI/bge-m3",
         "thresholds": {
             "index_token_budget": 4000,
             "staleness_days": 90,
@@ -37,10 +38,18 @@ def tmp_workspace(tmp_path):
             "enabled": True,
             "correction_threshold": 3,
         },
-        "lancedb": {
-            "path": "memory/lancedb",
-            "embedding_model": "BAAI/bge-m3"
-        }
+        "qdrant": {
+            "host": "localhost",
+            "port": 6333,
+            "collection": "wiki_pages",
+            "path": str(tmp_path / "memory" / "qdrant")
+        },
+        # Reranking disattivato nei test: evita di scaricare/caricare il cross-encoder
+        # (568M parametri) a ogni query, i test unitari mockano wiki_rerank.rerank
+        # dove serve verificarne il comportamento.
+        "reranker": {
+            "enabled": False,
+        },
     }
     (tmp_path / "wiki.config.json").write_text(json.dumps(config, indent=2))
     return tmp_path

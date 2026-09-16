@@ -31,9 +31,16 @@
     "enabled": true,
     "correction_threshold": 3
   },
-  "lancedb": {
-    "path": "memory/lancedb",
-    "embedding_model": "BAAI/bge-m3"
+  "embedding_model": "BAAI/bge-m3",
+  "device": null,
+  "qdrant": {
+    "host": "localhost",
+    "port": 6333,
+    "collection": "wiki_pages"
+  },
+  "reranker": {
+    "enabled": true,
+    "model": "BAAI/bge-reranker-v2-m3"
   },
   "exclude_from_index": []
 }

@@ -1,7 +1,7 @@
 # AI Longterm Wiki Memory — Plugin OpenClaw
 
-[![Version](https://img.shields.io/badge/versione-3.1.2-informational)](CHANGELOG.md)
-[![Tests](https://img.shields.io/badge/tests-124%20passati-brightgreen)](tests/)
+[![Version](https://img.shields.io/badge/versione-3.2.0-informational)](CHANGELOG.md)
+[![Tests](https://img.shields.io/badge/tests-111%20passati-brightgreen)](tests/)
 [![OpenClaw](https://img.shields.io/badge/funziona%20con-OpenClaw-purple)](https://github.com/openclaw/openclaw)
 
 **Memoria semantica a lungo termine per agenti AI**
@@ -57,7 +57,7 @@ Questo progetto risolve il problema con un'**architettura a doppia rappresentazi
         │
         ▼
 ┌───────────────────┐     ┌──────────────────────────┐
-│  File Markdown    │     │  LanceDB vector store     │
+│  File Markdown    │     │  Qdrant vector store     │
 │  wiki/concepts/   │◄────►  embedding bge-m3         │
 │  rag.md           │     │  (1024-dim, indice HNSW)  │
 └───────────────────┘     └──────────────────────────┘
@@ -76,8 +76,11 @@ Una query su *"come gli LLM gestiscono il contesto lungo"* recupera pagine su *"
 ### Ricerca vettoriale semantica
 Embedding [bge-m3](https://huggingface.co/BAAI/bge-m3) — multilingua (100+ lingue), 1024 dim, indice HNSW. Le query recuperano per significato. Nessun passo di re-indicizzazione. Il vector DB è l'indice, mantenuto continuamente.
 
+### Retrieval a due stadi — reranking cross-encoder *(v3.2)*
+La sola similarità del bi-encoder perde le interazioni fini tra query e chunk. Ogni query fa over-fetch dei candidati da Qdrant, poi [bge-reranker-v2-m3](https://huggingface.co/BAAI/bge-reranker-v2-m3) — multilingue, stessa famiglia di bge-m3 — ripunteggia ogni coppia (query, chunk) congiuntamente prima di tenere i top-k. Gira ovunque la query sia testo (`wiki_context.py`, `wiki.py query`, `/api/context` del server), saltato per gli archi del grafo basati su vettore medio, dove non c'è un testo di query con cui accoppiare. Configurabile e disattivabile nel blocco `reranker` di `wiki.config.json`; embedding e reranking scelgono entrambi CUDA automaticamente quando disponibile (`device: null`), altrimenti CPU.
+
 ### Scritture atomiche — resistente ai crash
-Ogni ingest segue un pattern `.tmp → staging LanceDB → promozione atomica`. Un crash lascia il sistema in uno stato rilevabile (`in-progress` in `wiki-session.md`). L'agente si recupera alla sessione successiva senza perdita di dati, senza corruzione silenziosa.
+Ogni ingest segue un pattern `.tmp → staging Qdrant → promozione atomica`. Un crash lascia il sistema in uno stato rilevabile (`in-progress` in `wiki-session.md`). L'agente si recupera alla sessione successiva senza perdita di dati, senza corruzione silenziosa.
 
 ### Iniezione di contesto pre-prompt
 `wiki_context.py` esegue una ricerca vettoriale **prima di ogni messaggio dell'utente** e aggiunge un blocco `<wiki-context>` con le pagine più rilevanti. Questo elimina il principale failure mode degli approcci basati su skill — l'agente ottiene contesto solo quando classifica un messaggio come QUERY:
@@ -109,7 +112,7 @@ Quando una risposta a una query integra ≥2 fonti wiki, supera 300 token, e agg
 ### Lint auto-riparante
 `wiki.py lint --full` rileva e ripara:
 - **Link wiki rotti** (`[[pagina]]` senza file corrispondente)
-- **Entry orfane LanceDB** (vettori per file eliminati — rimossi automaticamente)
+- **Entry orfane Qdrant** (vettori per file eliminati — rimossi automaticamente)
 - **Rename** (file spostato → aggiorna path nel DB senza re-embedding tramite `content_hash`)
 - **Duplicati semantici** (cosine similarity > 0.95 tra pagine)
 
@@ -150,7 +153,7 @@ Qualsiasi PDF da qualsiasi sorgente converge in `pdf-inbox/` e viene processato 
                    L'agente struttura in pagine .tmp
                                 │
                                 ▼
-                   wiki.py ingest → wiki/ + LanceDB
+                   wiki.py ingest → wiki/ + Qdrant
 ```
 
 **Come funziona il rilevamento delle modifiche:** hash SHA-256 per file. Stesso hash + `deposited` → salta. Hash diverso → riprocessa. Lo stato `pending` viene scritto prima dell'estrazione — un crash lascia il registro recuperabile.
@@ -204,7 +207,7 @@ Apri `http://localhost:7331`.
 **Funzionalità:**
 - **Grafo force-directed** — nodi dimensionati per grado di connessione, colorati per categoria (entità/concetti/sintesi), etichette su tutti i nodi
 - **Archi espliciti** — riferimenti `[[wiki-link]]` come frecce solide
-- **Archi semantici** — similarità coseno LanceDB ≥ 0.65 come linee tratteggiate
+- **Archi semantici** — similarità coseno Qdrant ≥ 0.65 come linee tratteggiate
 - **Aggiornamenti live** — WebSocket invia `graph_update` ad ogni modifica file; il grafo transiziona senza spostare i nodi
 - **Animazione query hit** — quando `wiki.py query` viene eseguito, i nodi recuperati pulsano oro→rosso per 4 secondi
 - **Pannello pagina** — click su un nodo → markdown renderizzato, link uscenti/entranti, pagine simili con barre di similarità
@@ -250,7 +253,7 @@ Un tab `[Stats]` integrato nel server web mostra lo stato del wiki senza bisogno
 - **4 KPI card** — pagine totali, chunk totali, copertura embedding %, pagine stale
 - **Più interrogate** — top-10 pagine per frequenza di query, aggregate da `.wiki-query-log.jsonl`
 - **Pagine stale** — pagine non modificate da più di `thresholds.staleness_days` giorni (default 90)
-- **Pagine senza embedding** — file presenti su disco ma assenti da LanceDB
+- **Pagine senza embedding** — file presenti su disco ma assenti da Qdrant
 - **Stato lint** — timestamp ultimo run, conteggio errori e warning (da `.wiki-lint-status.json`)
 - **Schedule auto-lint** — prossima esecuzione pianificata se `frontend.lint_interval_hours` è configurato
 
@@ -286,9 +289,10 @@ workspace/
 │   ├── wiki_context.py       ← iniettore contesto pre-prompt (hook)
 │   ├── wiki_pdf_watcher.py   ← scanner inbox PDF (hash detection + pdfplumber)
 │   ├── wiki_embed.py         ← chunking boundary-aware + embedding bge-m3
-│   ├── wiki_lancedb.py       ← operazioni LanceDB (upsert, staging, rename)
+│   ├── wiki_qdrant.py       ← operazioni Qdrant (upsert, staging, rename)
+│   ├── wiki_rerank.py        ← reranking cross-encoder (bge-reranker-v2-m3)
 │   ├── wiki_index.py         ← generazione index.md con budget token
-│   ├── wiki_graph.py         ← costruttore nodi/archi (filesystem + LanceDB, cache 30s)
+│   ├── wiki_graph.py         ← costruttore nodi/archi (filesystem + Qdrant, cache 30s)
 │   └── wiki_server.py        ← server FastAPI: REST, WebSocket, JWT auth, endpoint stats/lint
 ├── frontend/
 │   └── index.html            ← SPA: grafo D3.js + pannello pagina + client WebSocket
@@ -306,7 +310,7 @@ workspace/
 │       ├── concepts/
 │       └── synthesis/
 └── memory/
-    └── lancedb/              ← database vettoriale (escluso da git, ricostruibile)
+    └── qdrant/              ← database vettoriale (escluso da git, ricostruibile)
 ```
 
 **Invariante fondamentale:** L'agente non scrive mai direttamente nel wiki. Tutto passa per `wiki.py`. La skill guida il *quando* e il *perché*; gli script gestiscono il *come*.
@@ -429,21 +433,25 @@ Config minimale:
     "page_chunk_threshold_tokens": 1500,
     "quality_filter_min_score": 6
   },
-  "lancedb": {
-    "path": "memory/lancedb",
-    "embedding_model": "BAAI/bge-m3"
+  "embedding_model": "BAAI/bge-m3",
+  "qdrant": {
+    "host": "localhost",
+    "port": 6333,
+    "collection": "wiki_pages"
   }
 }
 ```
 
 > **`pdf_inbox.project_default`** — dove vanno i PDF quando il filename non corrisponde alle keyword di nessun progetto. Se omesso, usa il primo progetto definito nel config.
 
+> **Chiavi root opzionali** — `"device": null` fa scegliere automaticamente CUDA a embedding e reranking quando disponibile (imposta `"cpu"` per forzarlo); `"reranker": {"enabled": true, "model": "BAAI/bge-reranker-v2-m3"}` controlla il reranking cross-encoder (vedi [Retrieval a due stadi](#retrieval-a-due-stadi--reranking-cross-encoder-v32)). Entrambe opzionali — omettile per tenere i default sopra.
+
 ### Inizializza e testa
 
 ```bash
 py scripts/wiki.py rebuild --workspace my-workspace/
 pytest tests/ -v
-# Atteso: 82 test passati
+# Atteso: 111 test passati
 ```
 
 ---
@@ -481,7 +489,7 @@ Ogni comando produce JSON su stdout:
 ## Documentazione
 
 - [`AGENTS.md`](AGENTS.md) — istruzioni installazione per OpenClaw
-- [`DESIGN.md`](DESIGN.md) — architettura completa, workflow, schema LanceDB, risoluzione conflitti
+- [`DESIGN.md`](DESIGN.md) — architettura completa, workflow, schema Qdrant, risoluzione conflitti
 - [`SPEC.md`](SPEC.md) — spec implementativa, tabella stati di errore, dettagli integrazione
 - [`skills/wiki-core.md`](skills/wiki-core.md) — skill da installare nell'agente
 - [`AGENTS_PATCH.md`](AGENTS_PATCH.md) — *(legacy)* istruzioni d'uso — ora iniettate automaticamente dagli script di setup
@@ -489,6 +497,15 @@ Ogni comando produce JSON su stdout:
 ---
 
 ## Changelog
+
+### v3.2.0 — 2026-09-16
+
+**Vector store: LanceDB → Qdrant + reranking cross-encoder**
+
+- **change: backend vector store, LanceDB → Qdrant** — Stessa semplicità on-disk/in-memory per l'uso single-machine (`qdrant.path` o `:memory:` nei test), ma il layer di storage non è più un ostacolo per un server remoto/condiviso in futuro. `wiki.config.json` ora ha `embedding_model` a livello root e un blocco `qdrant: {host, port, collection}` al posto di `lancedb: {...}`.
+- **feat: retrieval a due stadi con reranking cross-encoder** — `bge-reranker-v2-m3` ripunteggia i candidati migliori di Qdrant prima di restituirli, catturando le interazioni query-chunk che il bi-encoder si perde. Vedi [Retrieval a due stadi](#retrieval-a-due-stadi--reranking-cross-encoder-v32) sopra. Configurabile/disattivabile nel blocco `reranker` di `wiki.config.json`.
+- **fix: device di embedding e reranker, CPU hardcoded → CUDA automatico** — `wiki_context.py` e `wiki_server.py` non forzano più `device="cpu"`; entrambi ora scelgono automaticamente CUDA quando disponibile (`device: null` in config), coerentemente con quanto già faceva `wiki_embed.py`.
+- Numero test: 124 → 107 (rimozione LanceDB) → 111 (copertura reranking aggiunta).
 
 ### v3.1.2 — 2026-05-27
 

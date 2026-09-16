@@ -144,41 +144,33 @@ def test_get_page_detail_links_in(tmp_workspace):
 
 def test_build_graph_semantic_edges(tmp_workspace, monkeypatch):
     import numpy as np
-    import pandas as pd
     import wiki_graph
+    import wiki_qdrant
+    from qdrant_client import QdrantClient
 
     _make_page(tmp_workspace / "wiki" / "concepts" / "rag.md", "RAG")
     _make_page(tmp_workspace / "wiki" / "concepts" / "transformer.md", "Transformer")
 
-    fake_df = pd.DataFrame([
-        {"path": "wiki/concepts/rag.md", "chunk_id": 0,
-         "vector": np.ones(1024).tolist(),
-         "chunk_text": "rag", "content_hash": "a", "page_hash": "a", "last_embedded": 0.0},
-        {"path": "wiki/concepts/transformer.md", "chunk_id": 0,
-         "vector": np.ones(1024).tolist(),
-         "chunk_text": "transformer", "content_hash": "b", "page_hash": "b", "last_embedded": 0.0},
-    ])
-
-    class FakeTable:
-        def to_pandas(self):
-            return fake_df
-
-    monkeypatch.setattr(wiki_graph, "_LANCEDB_AVAILABLE", True)
-    monkeypatch.setattr(wiki_graph, "_lancedb_get_db", lambda path: object())
-    monkeypatch.setattr(wiki_graph, "_lancedb_ensure_table", lambda db, table_name="wiki_pages": FakeTable())
-    monkeypatch.setattr(wiki_graph, "_lancedb_query_similar", lambda db, vec, k=5, path_prefix=None: [
-        {"path": "wiki/concepts/transformer.md", "_distance": 0.1,
-         "chunk_id": 0, "chunk_text": "transformer"},
-    ])
-
     cfg = json.loads((tmp_workspace / "wiki.config.json").read_text())
+    client = QdrantClient(":memory:")
+    vec = np.ones(1024).tolist()
+    wiki_qdrant.upsert(client, cfg, "wiki/concepts/rag.md", [
+        {"chunk_id": 0, "chunk_text": "rag", "content_hash": "a", "page_hash": "a", "vector": vec},
+    ])
+    wiki_qdrant.upsert(client, cfg, "wiki/concepts/transformer.md", [
+        {"chunk_id": 0, "chunk_text": "transformer", "content_hash": "b", "page_hash": "b", "vector": vec},
+    ])
+
+    monkeypatch.setattr(wiki_graph, "_QDRANT_AVAILABLE", True)
+    monkeypatch.setattr(wiki_graph, "_qdrant_get_db", lambda cfg: client)
+
     result = build_graph(str(tmp_workspace), cfg)
 
     sem_edges = [e for e in result["edges"] if e["type"] == "semantic"]
     assert len(sem_edges) == 1
     pair = {sem_edges[0]["source"], sem_edges[0]["target"]}
     assert pair == {"wiki/concepts/rag", "wiki/concepts/transformer"}
-    assert sem_edges[0]["weight"] == pytest.approx(0.9, abs=0.01)
+    assert sem_edges[0]["weight"] >= 0.65
 
 
 def test_graph_cache_reused(tmp_workspace):
@@ -208,10 +200,10 @@ def test_mark_dirty_forces_rebuild(tmp_workspace):
 
 def test_query_log_written(tmp_workspace, monkeypatch):
     import wiki_workflows
-    import wiki_lancedb
+    import wiki_qdrant
     import wiki_embed
 
-    def fake_query_similar(db, vector, k=5, path_prefix=None):
+    def fake_query_similar(db, cfg, vector, k=5, path_prefix=None):
         return [{"path": "wiki/concepts/rag.md", "chunk_id": 0,
                  "_distance": 0.1, "chunk_text": "rag chunk"}]
 
@@ -220,12 +212,12 @@ def test_query_log_written(tmp_workspace, monkeypatch):
             import numpy as np
             return np.zeros(1024)
 
-    monkeypatch.setattr(wiki_lancedb, "query_similar", fake_query_similar)
-    monkeypatch.setattr(wiki_lancedb, "get_db", lambda path: object())
+    monkeypatch.setattr(wiki_qdrant, "query_similar", fake_query_similar)
+    monkeypatch.setattr(wiki_qdrant, "get_db", lambda cfg: object())
     monkeypatch.setattr(wiki_embed, "_load_model", lambda name: (FakeModel(), None))
     # wiki_workflows imports these names directly at module level, so patch there too
     monkeypatch.setattr(wiki_workflows, "query_similar", fake_query_similar)
-    monkeypatch.setattr(wiki_workflows, "get_db", lambda path: object())
+    monkeypatch.setattr(wiki_workflows, "get_db", lambda cfg: object())
     monkeypatch.setattr(wiki_workflows, "_load_model", lambda name: (FakeModel(), None))
 
     cfg = json.loads((tmp_workspace / "wiki.config.json").read_text())

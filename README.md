@@ -5,8 +5,8 @@
 ### Semantic long-term memory for any AI agent, any LLM, any platform
 
 [![Python](https://img.shields.io/badge/Python-3.10+-3776ab?style=flat-square&logo=python&logoColor=white)](https://python.org)
-[![Tests](https://img.shields.io/badge/tests-124%20passed-brightgreen?style=flat-square)](tests/)
-[![LanceDB](https://img.shields.io/badge/LanceDB-embedded-e05d2a?style=flat-square)](https://lancedb.com)
+[![Tests](https://img.shields.io/badge/tests-111%20passed-brightgreen?style=flat-square)](tests/)
+[![Qdrant](https://img.shields.io/badge/Qdrant-vector%20store-dc244c?style=flat-square)](https://qdrant.tech/)
 [![OpenClaw](https://img.shields.io/badge/works%20with-OpenClaw-7c3aed?style=flat-square)](https://github.com/openclaw/openclaw)
 [![License](https://img.shields.io/badge/License-AGPL_3.0-blue?style=flat-square)](LICENSE)
 [![Last Commit](https://img.shields.io/github/last-commit/giovannifrontera/ai-longterm-wiki-memory-OpenClaw?style=flat-square)](https://github.com/giovannifrontera/ai-longterm-wiki-memory-OpenClaw/commits)
@@ -64,7 +64,7 @@ flowchart TD
     Domain -->|autonomous promotion| Distilled
     Distilled -->|self-reflection at session end| Identity
 
-    H[Hook System] -->|pre-prompt| H1[wiki_context.py\nvector search → top-K injected]
+    H[Hook System] -->|pre-prompt| H1[wiki_context.py\nvector search → rerank → top-K injected]
     H -->|post-tool| H2[observation capture\nfile reads · edits · commands]
     H -->|session end| H3[session compression\nbehaviour-log → self-reflect]
 ```
@@ -79,7 +79,7 @@ Every wiki page exists simultaneously in two synchronised forms:
         │
         ▼
 ┌───────────────────┐     ┌──────────────────────────┐
-│  Markdown file    │     │  LanceDB vector store     │
+│  Markdown file    │     │  Qdrant vector store      │
 │  wiki/concepts/   │◄────►  bge-m3 embeddings        │
 │  rag.md           │     │  1024-dim, HNSW index     │
 └───────────────────┘     └──────────────────────────┘
@@ -94,10 +94,13 @@ Markdown and embeddings are written **atomically** (`tmp → staging → product
 ## ✨ Features
 
 ### LLM-Agnostic
-Works with **any LLM or agent framework** that can read files and call bash commands. The memory backend (Python + LanceDB) is completely decoupled from the inference layer. Tested integrations: OpenClaw (Telegram, Discord, web), Claude Code, Gemini CLI, Codex, OpenCode. Switch models freely — the wiki persists unchanged.
+Works with **any LLM or agent framework** that can read files and call bash commands. The memory backend (Python + Qdrant) is completely decoupled from the inference layer. Tested integrations: OpenClaw (Telegram, Discord, web), Claude Code, Gemini CLI, Codex, OpenCode. Switch models freely — the wiki persists unchanged.
 
 ### Semantic Vector Search
 [bge-m3](https://huggingface.co/BAAI/bge-m3) embeddings — multilingual (100+ languages), 1024-dim, HNSW index. Queries retrieve by *meaning*, not keywords. A query about *"how LLMs handle long context"* retrieves pages about *"positional encoding"* and *"sliding window attention"* with no keyword overlap — because the meaning is close in embedding space.
+
+### Two-Stage Retrieval — Cross-Encoder Reranking
+Bi-encoder similarity alone misses fine-grained query-chunk interactions — two chunks can sit close in embedding space for generic topical reasons without either really answering the query. Every text query over-fetches candidates from Qdrant, then [bge-reranker-v2-m3](https://huggingface.co/BAAI/bge-reranker-v2-m3) — multilingual, same family as bge-m3 — rescores each `(query, chunk)` pair jointly before the top-K are kept. Applied everywhere retrieval starts from query text (`wiki_context.py`, `wiki.py query`, the server's `/api/context`); skipped for the graph's vector-average edges, which have no query text to pair against. Both embedding and reranking auto-select CUDA when available, falling back to CPU otherwise — configurable and disable-able per `wiki.config.json`.
 
 ### Pre-Prompt Context Injection
 `wiki_context.py` runs a vector search **before every user message** and prepends a `<wiki-context>` block with the top-K most relevant pages. The agent has relevant context regardless of how it classifies the message — no manual invocation required.
@@ -125,7 +128,7 @@ User corrections ("always", "never", "stop doing X") are logged via `wiki.py beh
 | Issue | Detection | Repair |
 |---|---|---|
 | Broken wiki links | Regex scan `[[target]]` → no matching file | Log orphan links |
-| Orphan vectors | LanceDB IDs absent from filesystem | Auto-delete stale records |
+| Orphan vectors | Qdrant points absent from filesystem | Auto-delete stale records |
 | File renames | `content_hash` match between DB-only and filesystem-only paths | Update path without re-embedding |
 | Semantic duplicates | Cosine similarity > 0.95 | Flag for merge; > 0.90 auto-merge candidate |
 
@@ -195,7 +198,8 @@ workspace/
 │   ├── wiki_context.py          ← pre-prompt hook
 │   ├── wiki_pdf_watcher.py      ← PDF inbox scanner (SHA-256 + pdfplumber)
 │   ├── wiki_embed.py            ← boundary-aware chunking + bge-m3
-│   ├── wiki_lancedb.py          ← LanceDB ops (upsert, staging, rename detection)
+│   ├── wiki_qdrant.py           ← Qdrant ops (upsert, staging, rename detection)
+│   ├── wiki_rerank.py           ← cross-encoder reranking (bge-reranker-v2-m3)
 │   ├── wiki_index.py            ← token-budget index generation
 │   ├── wiki_graph.py            ← node/edge builder (30s cache)
 │   └── wiki_server.py           ← FastAPI: REST, WebSocket, JWT, stats/lint
@@ -206,26 +210,29 @@ workspace/
 │   └── identity/                ← written only by wiki.py self-reflect
 ├── wiki-works/topic/            ← Domain layer (permanent, per topic)
 │   └── raw/ concepts/ entities/ synthesis/
-└── memory/lancedb/              ← unified vector space for all three layers
+└── (Qdrant runs as a separate service — see wiki.config.json "qdrant" section)
 ```
 
-### LanceDB Schema
+### Qdrant Schema
 
 ```
-wiki_pages table:
-  id            STRING PRIMARY KEY    -- relative path from workspace root
-  title         STRING
-  category      STRING                -- entities | concepts | synthesis | identity | raw
-  content       STRING                -- markdown body (truncated, 512-token chunks)
-  project       STRING                -- source domain/workspace
-  last_modified FLOAT                 -- Unix timestamp (drives staleness detection)
-  vector        FLOAT[1024]           -- bge-m3 embedding (HNSW index)
+wiki_pages collection (cosine distance, 1024-dim vectors):
+  point id      UUID (deterministic: md5(path + "::" + chunk_id))
+  payload.path            STRING   -- relative path from workspace root
+  payload.chunk_id        INT
+  payload.chunk_text      STRING   -- markdown chunk (512-token chunks, 64-token overlap)
+  payload.content_hash    STRING   -- sha256 of chunk text (change detection)
+  payload.page_hash       STRING   -- sha256 of full page (rename detection)
+  payload.last_embedded   FLOAT    -- Unix timestamp
 
-staging_wiki_pages table:          -- identical schema; vectors promoted atomically
+staging_wiki_pages collection:     -- identical schema; points promoted atomically
 ```
 
 ### Chunking Strategy
 Pages are split using the bge-m3 native tokenizer. Boundaries respect `##` and `###` headings — chunks never cut mid-section. Pages under 1,500 tokens are embedded whole; larger pages use 512-token chunks with 64-token overlap. Upsert deletes all existing chunks for a path before inserting new ones — no orphan chunks when a page changes.
+
+### Two-Stage Retrieval Detail
+A text query over-fetches `k × 8` candidates from Qdrant (bi-encoder similarity), the cross-encoder rescores each `(query, chunk)` pair, results are deduplicated per page keeping the highest rerank score, then truncated to `k`. Reranking runs in a thread executor on the server path so it never blocks the event loop; if `reranker.enabled` is `false` in config, retrieval falls back to plain bi-encoder ranking with no behaviour change elsewhere.
 
 ### CLI Reference
 
@@ -251,22 +258,24 @@ All commands output structured JSON to stdout.
 
 ## 🏛 Architectural Decisions
 
-**LLM-agnostic backend:** The Python/LanceDB stack has zero dependencies on any specific inference provider. The agent skill (`wiki-core.md`) guides intent classification and workflow routing using natural language — any LLM that can follow instructions can use it. This is a deliberate design choice: the memory system outlasts any particular model generation.
+**LLM-agnostic backend:** The Python/Qdrant stack has zero dependencies on any specific inference provider. The agent skill (`wiki-core.md`) guides intent classification and workflow routing using natural language — any LLM that can follow instructions can use it. This is a deliberate design choice: the memory system outlasts any particular model generation.
 
 **Markdown-first over pure vector:** Markdown files are human-readable, Git-trackable, and editable without special tooling. The vector index is a derived artefact that can always be rebuilt from source via `wiki.py rebuild`. Researchers retain full auditability and manual curation capability.
 
-**Staging table for atomic ingest:** Vectors are written to `staging_wiki_pages` first. Only `promote_staging()` moves them to `wiki_pages`. A crash leaves staging populated; the next session clears it and logs the event — no silent data corruption.
+**Staging collection for atomic ingest:** Points are written to `staging_wiki_pages` first. Only `promote_staging()` moves them to `wiki_pages`. A crash leaves staging populated; the next session clears it and logs the event — no silent data corruption.
 
 **Identity layer write-protected:** `wiki/identity/` is written *only* by `wiki.py self-reflect`, never directly by the agent. This prevents real-time feedback loops where current behaviour immediately reinforces itself, ensuring genuine long-term pattern stabilisation.
+
+**Reranking as a second stage, not a replacement:** the bi-encoder still does the heavy lifting — cheap ANN search over the whole collection. The cross-encoder only ever sees the already-narrowed candidate set, keeping its per-query cost bounded regardless of wiki size.
 
 ---
 
 ## ⚠️ Known Limitations
 
-- **No transactional semantics:** LanceDB does not support rollback. Crashes between vector write and Markdown write create orphan vectors — resolved by the next lint run.
-- **Single-machine:** The current architecture targets a single researcher's local machine. Shared team wikis require a centralised LanceDB instance or REST API layer.
+- **No transactional semantics:** Qdrant does not roll back a partial write across the vector/Markdown pair. Crashes between the two create orphan vectors — resolved by the next lint run.
+- **Single-machine:** The current architecture targets a single researcher's local machine. Shared team wikis require a centralised Qdrant instance or REST API layer.
 - **Scanned PDFs:** Image-only PDFs (no selectable text) are flagged `status: failed` in the registry and skipped on future scans — no OCR support currently.
-- **Hook latency:** The first SessionStart hook after a large ingest may be slow (cold LanceDB HNSW index construction).
+- **Hook latency:** The first SessionStart hook after a large ingest may be slow (cold Qdrant HNSW index construction); reranking adds a further, usually small, per-query cost on CPU-only machines.
 
 ---
 
@@ -275,7 +284,8 @@ All commands output structured JSON to stdout.
 ### Requirements
 
 - Python 3.10+
-- ~2 GB disk (BAAI/bge-m3, downloaded automatically on first run)
+- ~3 GB disk (BAAI/bge-m3 + BAAI/bge-reranker-v2-m3, downloaded automatically on first run)
+- A running Qdrant instance (local `:memory:`/on-disk mode for single-machine use, or a server — see [Qdrant's docs](https://qdrant.tech/documentation/))
 
 ### Install
 
@@ -302,7 +312,10 @@ Minimal `wiki.config.json`:
       "keywords": ["paper", "study", "review", "article"]
     }
   },
-  "lancedb": { "path": "memory/lancedb", "embedding_model": "BAAI/bge-m3" },
+  "embedding_model": "BAAI/bge-m3",
+  "device": null,
+  "qdrant": { "host": "localhost", "port": 6333, "collection": "wiki_pages" },
+  "reranker": { "enabled": true, "model": "BAAI/bge-reranker-v2-m3" },
   "thresholds": {
     "index_token_budget": 4000,
     "staleness_days": 90,
@@ -312,12 +325,14 @@ Minimal `wiki.config.json`:
 }
 ```
 
+`device: null` auto-selects CUDA when available (set `"cpu"` to force it); `reranker.enabled: false` disables the cross-encoder stage and falls back to plain bi-encoder ranking.
+
 ### Initialise and Test
 
 ```bash
 python scripts/wiki.py rebuild --workspace my-workspace/
 pytest tests/ -v
-# Expected: 124 passed
+# Expected: 111 passed
 ```
 
 ### OpenClaw Integration
